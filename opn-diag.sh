@@ -28,6 +28,11 @@ DIVIDER_MAJOR="=================================================================
 DIVIDER_MINOR="--------------------------------------------------------------------------------"
 COOLDOWN_SECONDS=1 # Seconds to pause after certain long-running commands
 
+SANITIZE_MODE=false
+if [ "$1" = "--sanitize" ]; then
+    SANITIZE_MODE=true
+fi
+
 # Define command paths
 OPNSENSE_VERSION_CMD="/usr/local/sbin/opnsense-version"
 OPNSENSE_LOG_CMD="/usr/local/sbin/opnsense-log"
