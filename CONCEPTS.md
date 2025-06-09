@@ -34,7 +34,74 @@ The `opn-diag.sh` script is designed to be a comprehensive, portable, and safe t
     *   **OPNsense-Specific Tooling**: The script heavily leverages OPNsense's built-in `configctl` command-line utility. This is the preferred way to get structured, reliable information about the firewall's configuration and status, as it queries the live configuration directly.
     *   **Fallback Mechanisms**: Where possible, the script has fallbacks. For example, if it cannot determine the WAN interface for `tcpdump` from `configctl`, it falls back to parsing the output of `netstat` to find the default route's interface.
 
+## Sanitization Logic
+
+This section details how the `--sanitize` flag works to protect sensitive information while keeping the output useful for diagnostics.
+
+The sanitization process is designed to be intelligent. It doesn't just replace every IP address with `[REDACTED_IPv4]`. Instead, it first builds a map of known, important IP addresses and replaces them with descriptive labels.
+
+1.  **IP Map Creation (`build_ip_map`)**:
+    *   The script iterates through the output of `ifconfig -a` to find the IP addresses (v4 and v6) assigned to each interface (e.g., `em0`, `igc1`). It creates a mapping like `192.168.1.1` -> `[INTERFACE_LAN_IP]`.
+    *   It then queries `configctl interface gateways status json` to get the IP addresses of configured gateways and maps them, for example, to `[GATEWAY_WAN_DHCP_IP]`.
+    *   This map is stored in a temporary file as a series of `sed` substitution commands.
+
+2.  **Redaction Execution (`run_sanitization`)**:
+    *   The script uses `sed` to perform multiple passes over the generated output file.
+    *   **Pass 1**: It applies the custom IP map created in the previous step. This ensures that contextually important IPs are labeled descriptively.
+    *   **Pass 2**: It applies a series of generic regex patterns to catch any remaining sensitive data:
+        *   It redacts MAC addresses, keeping the OUI (the first three octets) to preserve manufacturer information (e.g., `00:11:22:33:44:55` becomes `00:11:22:[REDACTED_MAC_SUFFIX]`).
+        *   It redacts any remaining FQDNs (e.g., `my-server.example.com` becomes `[REDACTED_FQDN]`).
+        *   It redacts any remaining IPv4 and IPv6 addresses that weren't in the map.
+        *   It redacts the system's hostname.
+        *   It redacts disk serial numbers from the output of `geom disk list`.
+
+This multi-stage process ensures the final file is safe to share while being significantly more useful for troubleshooting than a file with generic redactions.
+
 ## Diagnostic Sections Breakdown
+
+### Section 1: System Information (`collect_system_info`)
+
+*   **Logic and Purpose**: This section gathers high-level information about the operating system and its status. It establishes a baseline understanding of the software environment.
+*   **Commands Executed**:
+    *   `uname -a`: Prints detailed OS information, including the kernel version, architecture, and build date. Essential for identifying the base FreeBSD version.
+    *   `freebsd-version -ukr`: Shows the installed userland, kernel, and running kernel versions. Helps spot mismatches that can occur after an update.
+    *   `uptime`: Shows how long the system has been running, the number of users, and the system load averages. A recent reboot could be a sign of a crash. High load averages point to performance issues.
+    *   `cat /var/run/dmesg.boot`: Dumps the kernel message buffer from boot time. This is invaluable for diagnosing hardware detection issues, driver failures, or other problems that occur very early in the boot process.
+    *   `configctl system status`: An OPNsense-specific command to get a quick, structured overview of the system's health, including versions and service status.
+    *   `configctl system sensors`: Queries the system's hardware sensors for temperature, voltage, and fan speed. Critical for diagnosing overheating or hardware power issues.
+*   **Troubleshooting Use Cases**:
+    *   **Problem**: The firewall is crashing randomly.
+    *   **Analysis**: Check `uptime` to see if the crashes coincide with specific times. Review `dmesg.boot` and `configctl system sensors` for signs of hardware errors or overheating that could cause instability.
+    *   **Problem**: A new network card is not working.
+    *   **Analysis**: Search the `dmesg.boot` output for the card's model or the driver name. If it shows errors during initialization or isn't detected at all, it points to a driver or hardware compatibility issue.
+
+---
+
+### Section 2: Hardware Diagnostics (`collect_hardware_diagnostics`)
+
+*   **Logic and Purpose**: This section probes the physical hardware of the system. It's designed to identify issues with the CPU, memory, storage, and motherboard.
+*   **Commands Executed**:
+    *   `lscpu`: Lists detailed CPU information, including model, cores, speed, and features.
+    *   `lsblk`: Lists block devices (disks). Useful for seeing all detected storage devices.
+    *   `hwstat`: Provides a general hardware status overview.
+    *   `dmidecode -q -t system` & `dmidecode -q -t bios`: Queries the DMI (or SMBIOS) data to get the system manufacturer, model number, serial number, and BIOS/UEFI version. Invaluable for identifying the exact hardware and checking for firmware updates.
+    *   `geom disk list`: Shows detailed information about disk geometry and attached disks from the FreeBSD GEOM framework.
+    *   `smartctl -a /dev/...`: Runs a full Self-Monitoring, Analysis, and Reporting Technology (SMART) check on each detected disk. This can reveal a failing or unhealthy disk before it fails completely.
+*   **Troubleshooting Use Cases**:
+    *   **Problem**: The system is performing poorly or has I/O errors in the logs.
+    *   **Analysis**: Examine the output of `smartctl`. Look for non-zero values in `Reallocated_Sector_Ct`, `Current_Pending_Sector`, or a `FAILED` status in the overall health assessment. These are strong indicators of a failing disk.
+    *   **Problem**: You need to confirm if a system's BIOS/UEFI is out of date.
+    *   **Analysis**: The `dmidecode -t bios` output shows the current firmware version and release date. This can be compared against the manufacturer's website to see if an update is available, which might fix stability or compatibility issues.
+    *   **Sample `smartctl` Output Snippet**:
+        ```
+        SMART Attributes Data Structure revision number: 10
+        ID# ATTRIBUTE_NAME          FLAG     VALUE WORST THRESH TYPE      UPDATED  WHEN_FAILED RAW_VALUE
+          5 Reallocated_Sector_Ct   0x0033   100   100   005    Pre-fail  Always       -       0
+          9 Power_On_Hours          0x0032   099   099   000    Old_age   Always       -       12345
+        197 Current_Pending_Sector  0x0022   100   100   000    Old_age   Always       -       8
+        ```
+    *   **Interpretation**: In this sample, the `Current_Pending_Sector` count of 8 indicates there are sectors the drive firmware is unsure about. This is a warning sign that the disk may be developing problems.
+
 ---
 
 ### Section 3: Interface Configuration & Status (`collect_interface_config`)
@@ -100,53 +167,3 @@ The `opn-diag.sh` script is designed to be a comprehensive, portable, and safe t
     *   **Analysis**: This classic symptom almost always points to DNS failure. Check the output of `drill google.com`. If it fails, the problem is with the firewall's upstream DNS servers. Check `configctl system list nameservers` to see what they are. Check `pgrep -lf unbound` to ensure the local DNS service is running. If it is, its logs (Section 9) are the next place to look.
     *   **Problem**: You have a local override for `myserver.local` to point to a private IP, but clients are getting a public IP instead.
     *   **Analysis**: Look at the "Testing Local Unbound Zones" block. Did the script test `myserver.local`? Did the `drill` output show the correct private IP? If not, it indicates a misconfiguration in the Unbound DNS Overrides section of the OPNsense GUI.
-
-## Sanitization Logic
-
-
-### Section 1: System Information (`collect_system_info`)
-
-*   **Logic and Purpose**: This section gathers high-level information about the operating system and its status. It establishes a baseline understanding of the software environment.
-*   **Commands Executed**:
-    *   `uname -a`: Prints detailed OS information, including the kernel version, architecture, and build date. Essential for identifying the base FreeBSD version.
-    *   `freebsd-version -ukr`: Shows the installed userland, kernel, and running kernel versions. Helps spot mismatches that can occur after an update.
-    *   `uptime`: Shows how long the system has been running, the number of users, and the system load averages. A recent reboot could be a sign of a crash. High load averages point to performance issues.
-    *   `cat /var/run/dmesg.boot`: Dumps the kernel message buffer from boot time. This is invaluable for diagnosing hardware detection issues, driver failures, or other problems that occur very early in the boot process.
-    *   `configctl system status`: An OPNsense-specific command to get a quick, structured overview of the system's health, including versions and service status.
-    *   `configctl system sensors`: Queries the system's hardware sensors for temperature, voltage, and fan speed. Critical for diagnosing overheating or hardware power issues.
-*   **Troubleshooting Use Cases**:
-    *   **Problem**: The firewall is crashing randomly.
-    *   **Analysis**: Check `uptime` to see if the crashes coincide with specific times. Review `dmesg.boot` and `configctl system sensors` for signs of hardware errors or overheating that could cause instability.
-    *   **Problem**: A new network card is not working.
-    *   **Analysis**: Search the `dmesg.boot` output for the card's model or the driver name. If it shows errors during initialization or isn't detected at all, it points to a driver or hardware compatibility issue.
-
----
-
-### Section 2: Hardware Diagnostics (`collect_hardware_diagnostics`)
-
-*   **Logic and Purpose**: This section probes the physical hardware of the system. It's designed to identify issues with the CPU, memory, storage, and motherboard.
-*   **Commands Executed**:
-    *   `lscpu`: Lists detailed CPU information, including model, cores, speed, and features.
-    *   `lsblk`: Lists block devices (disks). Useful for seeing all detected storage devices.
-    *   `hwstat`: Provides a general hardware status overview.
-    *   `dmidecode -q -t system` & `dmidecode -q -t bios`: Queries the DMI (or SMBIOS) data to get the system manufacturer, model number, serial number, and BIOS/UEFI version. Invaluable for identifying the exact hardware and checking for firmware updates.
-    *   `geom disk list`: Shows detailed information about disk geometry and attached disks from the FreeBSD GEOM framework.
-    *   `smartctl -a /dev/...`: Runs a full Self-Monitoring, Analysis, and Reporting Technology (SMART) check on each detected disk. This can reveal a failing or unhealthy disk before it fails completely.
-*   **Troubleshooting Use Cases**:
-    *   **Problem**: The system is performing poorly or has I/O errors in the logs.
-    *   **Analysis**: Examine the output of `smartctl`. Look for non-zero values in `Reallocated_Sector_Ct`, `Current_Pending_Sector`, or a `FAILED` status in the overall health assessment. These are strong indicators of a failing disk.
-    *   **Problem**: You need to confirm if a system's BIOS/UEFI is out of date.
-    *   **Analysis**: The `dmidecode -t bios` output shows the current firmware version and release date. This can be compared against the manufacturer's website to see if an update is available, which might fix stability or compatibility issues.
-    *   **Sample `smartctl` Output Snippet**:
-        ```
-        SMART Attributes Data Structure revision number: 10
-        ID# ATTRIBUTE_NAME          FLAG     VALUE WORST THRESH TYPE      UPDATED  WHEN_FAILED RAW_VALUE
-          5 Reallocated_Sector_Ct   0x0033   100   100   005    Pre-fail  Always       -       0
-          9 Power_On_Hours          0x0032   099   099   000    Old_age   Always       -       12345
-        197 Current_Pending_Sector  0x0022   100   100   000    Old_age   Always       -       8
-        ```
-    *   **Interpretation**: In this sample, the `Current_Pending_Sector` count of 8 indicates there are sectors the drive firmware is unsure about. This is a warning sign that the disk may be developing problems.
-
-## Sanitization Logic
-
-This section details how the `--sanitize` flag works to protect sensitive information while keeping the output useful for diagnostics.
