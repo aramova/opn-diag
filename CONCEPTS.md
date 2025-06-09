@@ -15,7 +15,7 @@ The `opn-diag.sh` script is designed to be a comprehensive, portable, and safe t
 
 2.  **Robustness and Portability**:
     *   **Dependency Checks**: The `perform_initial_checks` function verifies the existence and executability of essential binaries at the start. For non-essential but useful tools (like `lscpu`, `mtr`, `jq`), the script gracefully skips the corresponding tests and suggests the appropriate package to install, rather than failing.
-    *   **Shell Compatibility**: The script uses `#!/usr/local/bin/bash` and adheres to `bash`-compatible syntax, which is the default shell on OPNsense. It avoids `sh` (Bourne shell) specific limitations and uses features like arrays for better structure.
+    *   **Shell Compatibility**: The script uses `#!/usr/local/bin/bash` and adheres to `bash`-compatible syntax It avoids `sh` (Bourne shell) specific limitations and uses features like arrays for better structure.
     *   **OS/Tool Variant Awareness**: The code accounts for differences between BSD and GNU userland tools where possible. For example, the `sed` commands for sanitization use `[[:<:]]` and `[[:>:]]` for word boundaries, which are more portable than `\b`.
 
 3.  **User Experience and Feedback**:
