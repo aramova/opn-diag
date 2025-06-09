@@ -8,7 +8,9 @@ The collected data is intended to aid in troubleshooting complex issues, perform
 
 * **Comprehensive Data Collection**: Gathers detailed information across 19 distinct diagnostic sections, from system info and hardware details to firewall rules and network connectivity.
 
-* **Dynamic & Modular**: The script's execution flow is controlled by arrays, making it easy for developers to reorder, add, or remove diagnostic sections without breaking the script's structure.
+* **Sanitization Mode**: Includes a `--sanitize` flag to redact sensitive information (IP addresses, MACs, hostnames, serial numbers) from the output, making it safe to share.
+	
+	* **Dynamic & Modular**: The script's execution flow is controlled by arrays, making it easy for developers to reorder, add, or remove diagnostic sections without breaking the script's structure.
 
 * **Detailed Logging & Timestamps**: Every command is logged with its full output, exit status, and execution duration. Each major section's cumulative execution time is also calculated and logged.
 
@@ -61,6 +63,13 @@ Open a shell on your OPNsense machine (e.g., via SSH) and run the following comm
 As the root user, execute the script using bash:
 
 `bash ./opn-diag.sh`
+	
+### Command-line Options
+
+*   **`--sanitize`**: Runs the script in sanitization mode. This will redact sensitive information from the output file, including IP addresses (v4/v6), MAC addresses, FQDNs, hostnames, and disk serial numbers. The resulting file is generally safe to share for public troubleshooting.
+
+`bash ./opn-diag.sh --sanitize`
+
 
 The script will print live progress to the terminal and inform you when it has finished.
 

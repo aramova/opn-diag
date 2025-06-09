@@ -37,8 +37,9 @@
 # - Refined FQDN regex to be more specific (v0.50.22)
 # - Updated FQDN redaction to use a list of official TLDs (v0.50.23)
 # - Prevented incorrect sanitization of kernel tunables (v0.50.24)
+# - Added detailed comments to all functions (v0.50.25)
 
-SCRIPT_VERSION="v0.50.24"
+SCRIPT_VERSION="v0.50.25"
 OUTPUT_FILE="opnsense_diagnostics_output_$(date +%Y%m%d_%H%M%S).txt"
 DIVIDER_MAJOR="================================================================================"
 DIVIDER_MINOR="--------------------------------------------------------------------------------"
@@ -94,6 +95,18 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
+#
+# Displays a colored banner at the top right of the terminal indicating
+# whether the script output is being sanitized. This provides a constant,
+# clear visual cue to the user about the state of the final output file.
+#
+# Expects:
+#   - The global variable SANITIZE_MODE to be 'true' or 'false'.
+#   - Terminal colors (C_GREEN, C_RED, C_RESET) to be set if the TTY is interactive.
+#
+# Usage:
+#   display_status_banner
+#
 display_status_banner() {
     if [ ! -t 1 ]; then return; fi # Skip if not interactive TTY
     local message
@@ -119,7 +132,17 @@ display_status_banner() {
 }
 
 
-# Function to initialize the output file
+#
+# Creates and initializes the main output file. It adds a header with the
+# script version, collection date, hostname, and OPNsense version.
+#
+# Expects:
+#   - The global variables SCRIPT_VERSION and OUTPUT_FILE to be set.
+#   - The command defined in OPNSENSE_VERSION_CMD to be executable.
+#
+# Usage:
+#   initialize_output_file
+#
 initialize_output_file() {
     echo "OPNsense Comprehensive Diagnostics Collection ($SCRIPT_VERSION)" \
         > "$OUTPUT_FILE"
@@ -137,7 +160,19 @@ initialize_output_file() {
     echo "$DIVIDER_MAJOR" >> "$OUTPUT_FILE"
 }
 
-# Function for initial permission checks (TTY and file)
+#
+# Performs initial checks before starting the main diagnostic collection.
+# It clears the screen, displays the status banner, and checks for the
+# existence and permissions of all required and optional diagnostic tools.
+# The results of these checks are printed to both the TTY and the output file.
+#
+# Expects:
+#   - The global arrays CMD_PATHS_TO_CHECK and related command path
+#     variables to be defined.
+#
+# Usage:
+#   perform_initial_checks
+#
 perform_initial_checks() {
     clear # Clear screen for clean banner display
     display_status_banner
@@ -184,6 +219,22 @@ perform_initial_checks() {
     echo "$DIVIDER_MAJOR" >> "$OUTPUT_FILE"
 }
 
+#
+# A centralized wrapper function for executing most shell commands.
+# It handles all the logic for logging, timing, and status reporting for
+# each step. It prints a clean, single-line status to the TTY and logs
+# the verbose command, output, duration, and exit status to the output file.
+#
+# Parameters:
+#   $1: CMD_STRING - The full command to be executed, as a single string.
+#   $2: LABEL - A human-readable description of what the command does.
+#   $3: APPLY_COOLDOWN - (Optional) If set to the string "cooldown", the
+#       function will pause for COOLDOWN_SECONDS after the command completes.
+#
+# Usage:
+#   execute_cmd "cat /etc/resolv.conf" "Show DNS Resolver Config"
+#   execute_cmd "pfctl -s info" "Get PF Info" "cooldown"
+#
 execute_cmd() {
   local CMD_STRING=$1 LABEL=$2 APPLY_COOLDOWN=$3
   local cmd_status start_time end_time duration
@@ -207,6 +258,21 @@ execute_cmd() {
   echo "$DIVIDER_MAJOR" >> "$OUTPUT_FILE"
 }
 
+#
+# A wrapper around execute_cmd that first checks if a specific binary
+# exists and is executable. If it is, the command is run. If not, the
+# step is skipped with a message, and a suggestion for how to install
+# the missing tool is often provided.
+#
+# Parameters:
+#   $1: CMD_PATH - The absolute path to the binary to check.
+#   $2: CMD_ARGS - A string of arguments to pass to the command.
+#   $3: LABEL - A human-readable description of the step.
+#   $4: APPLY_COOLDOWN - (Optional) Passed through to execute_cmd.
+#
+# Usage:
+#   execute_if_binary_exists "/usr/local/bin/lscpu" "" "Get CPU Info"
+#
 execute_if_binary_exists() {
   local CMD_PATH=$1 CMD_ARGS=$2 LABEL=$3 APPLY_COOLDOWN=$4
   local suggestion cmd_status start_time end_time duration full_command=()
@@ -246,6 +312,17 @@ execute_if_binary_exists() {
   echo "$DIVIDER_MAJOR" >> "$OUTPUT_FILE"
 }
 
+#
+# A wrapper function that safely cats a file to the output log.
+# It checks if the file exists and is readable before attempting to cat it.
+# If the file is not accessible, it logs a skipped message.
+#
+# Parameters:
+#   $1: FILE_PATH - The absolute path to the file to be read.
+#
+# Usage:
+#   cat_if_exists "/etc/resolv.conf"
+#
 cat_if_exists() {
     local FILE_PATH=$1
     local LABEL="Content of $FILE_PATH" 
@@ -261,6 +338,17 @@ cat_if_exists() {
     fi
 }
 
+#
+# Collects fundamental system and operating system information.
+# This section establishes a baseline of the OPNsense version, FreeBSD kernel,
+# uptime, and hardware sensor status.
+#
+# Gathers:
+#   - OS and kernel version (`uname`, `freebsd-version`)
+#   - System uptime and load
+#   - Kernel boot messages (`dmesg.boot`)
+#   - OPNsense system status and hardware sensor data (`configctl`)
+#
 collect_system_info() {
     execute_cmd "uname -a" "Get System Name (uname -a)"
     execute_cmd "freebsd-version -ukr" "Get FreeBSD Version"
@@ -270,6 +358,21 @@ collect_system_info() {
     execute_if_binary_exists "$CONFIGCTL_CMD" "system sensors" "Get System Sensors (configctl)"
 }
 
+#
+# Gathers detailed information about the physical hardware components of the system.
+# This is crucial for diagnosing issues related to CPU, storage, and the motherboard.
+#
+# Gathers:
+#   - CPU details (`lscpu`)
+#   - Block device listing (`lsblk`)
+#   - General hardware status (`hwstat`)
+#   - System/BIOS manufacturer and version details (`dmidecode`)
+#   - Disk partition and geometry information (`geom`)
+#   - Detailed disk health status for all physical disks (`smartctl`)
+#
+# Note:
+#   - When in sanitize mode, this function redacts disk serial numbers.
+#
 collect_hardware_diagnostics() {
     local LABEL_SMART start_time_block end_time_block duration_block DISKS disk
     execute_if_binary_exists "$LSCPU_CMD" "" "Get CPU Info (lscpu)"
@@ -314,6 +417,18 @@ collect_hardware_diagnostics() {
     sleep "$COOLDOWN_SECONDS"
 }
 
+#
+# Collects a comprehensive snapshot of the network interface configuration,
+# status, and statistics. This is one of the most critical sections for
+# diagnosing all types of network connectivity issues.
+#
+# Gathers:
+#   - Verbose interface details including MAC, IP, MTU, and flags (`ifconfig`)
+#   - OPNsense's view of interface configuration and stats (`configctl`)
+#   - Packet, error, and drop counts for all interfaces (`netstat`)
+#   - Recent kernel messages, which may show link state changes (`dmesg`)
+#   - CARP (HA) status (`configctl`)
+#
 collect_interface_config() {
     execute_cmd "ifconfig -a -vv" "Full Interface Details (ifconfig -a -vv)"
     execute_if_binary_exists "$CONFIGCTL_CMD" "interface list ifconfig" "Interface List (configctl)"
@@ -324,6 +439,17 @@ collect_interface_config() {
     execute_if_binary_exists "$CONFIGCTL_CMD" "interface show carp" "CARP Status (configctl)"
 }
 
+#
+# Gathers information about the Layer 3 networking environment, including
+# routing tables, ARP/NDP tables, and gateway status. This section helps
+# diagnose issues with traffic flow and local network address resolution.
+#
+# Gathers:
+#   - Kernel routing tables (`netstat -r`)
+#   - OPNsense's view of configured routes (`configctl`)
+#   - ARP (IPv4) and NDP (IPv6) tables (`arp`, `configctl`)
+#   - Real-time status of configured gateways (`configctl`)
+#
 collect_routing_arp() {
     execute_cmd "netstat -r -n -A -W" "Routing Tables (netstat -rnAW)"
     execute_if_binary_exists "$CONFIGCTL_CMD" "interface routes list" "Routes List (configctl)"
@@ -334,10 +460,31 @@ collect_routing_arp() {
     execute_if_binary_exists "$CONFIGCTL_CMD" "interface gateways status" "Gateway Status (configctl)"
 }
 
+#
+# Retrieves kernel-level configuration values related to ARP timeouts.
+# This is useful for advanced troubleshooting of intermittent connectivity
+# issues where devices might be dropping off the network due to stale
+# or expiring ARP entries.
+#
+# Gathers:
+#   - ARP timeout and retry settings from `sysctl`.
+#
 collect_arp_timeouts() {
     execute_cmd "sysctl net.link.ether.inet" "ARP System Configuration (sysctl net.link.ether.inet)"
 }
 
+#
+# This section performs a deep dive into the DNS configuration and resolution
+# capabilities of the firewall. DNS is a frequent source of network problems,
+# and this function checks it from multiple angles.
+#
+# Gathers:
+#   - The firewall's own resolver configuration (`/etc/resolv.conf`).
+#   - DNS servers configured in OPNsense (`configctl`).
+#   - Status of local DNS services (Unbound, Dnsmasq).
+#   - Detailed statistics from Unbound DNS resolver.
+#   - Live tests of external and internal DNS resolution using `drill`.
+#
 collect_dns_resolution() {
     local LABEL_LOCAL_ZONES start_time_block LOCAL_ZONES_OUTPUT IFS_OLD_DRILL
     local zone_line zone_to_test end_time_block duration_block
@@ -391,6 +538,19 @@ collect_dns_resolution() {
     display_status_banner
 }
 
+#
+# Gathers diagnostic information from the Packet Filter (PF) firewall,
+# which is the core of OPNsense's filtering capabilities. This section
+# is essential for debugging any issue related to firewall rules, NAT,
+# or traffic shaping.
+#
+# Gathers:
+#   - Active firewall rules (`pfctl -s rules`)
+#   - NAT rules (`pfctl -s nat`)
+#   - A sample of the firewall state table (`pfctl -s states`)
+#   - General PF status and statistics (`pfctl -s info`)
+#   - The contents of all PF tables (`pfctl -s Tables`)
+#
 collect_firewall_pf_diagnostics() {
     execute_cmd "pfctl -s rules -vv" "PF Rules (pfctl -s rules -vv)"
     execute_cmd "pfctl -s nat -vv" "PF NAT Rules (pfctl -s nat -vv)"
@@ -402,6 +562,19 @@ collect_firewall_pf_diagnostics() {
     execute_if_binary_exists "$CONFIGCTL_CMD" "filter list tables" "PF Tables (configctl)"
 }
 
+#
+# Collects information about current network connections and socket
+# statistics. This is useful for understanding what services are listening
+# for connections and for diagnosing resource exhaustion issues related to
+# networking.
+#
+# Gathers:
+#   - All listening and established network sockets (`netstat -an`)
+#   - Detailed statistics for each network protocol (`netstat -ss`)
+#   - A summary of open sockets by process (`sockstat`)
+#   - Kernel memory usage for network buffers (mbufs) (`netstat -m`)
+#   - Interrupt statistics (`vmstat -i`)
+#
 collect_net_connections() {
     execute_cmd "netstat -an -A" "All Network Sockets (netstat -anA)"
     execute_cmd "netstat -ss" "Network Statistics by Protocol (netstat -ss)"
@@ -412,6 +585,17 @@ collect_net_connections() {
     execute_cmd "vmstat -i" "Interrupt Statistics (vmstat -i)"
 }
 
+#
+# Gathers recent log entries from various OPNsense-specific log files.
+# This provides critical context for almost any issue, as errors and
+# important events are typically logged.
+#
+# Gathers:
+#   - The last 200 lines of the main system log.
+#   - The last 200 lines of the firewall (filter) log.
+#   - The last 100 lines of the routing, resolver (DNS), DHCP,
+#     and NTP daemon logs.
+#
 collect_system_logs() {
     execute_if_binary_exists "$OPNSENSE_LOG_CMD" "system --lines 200" "OPNsense System Log (Last 200)"
     # Use execute_cmd with head for filter log as --lines might be unreliable
@@ -433,6 +617,17 @@ collect_system_logs() {
     execute_if_binary_exists "$OPNSENSE_LOG_CMD" "chrony --lines 100" "OPNsense Chrony Log (Last 100)"
 }
 
+#
+# Performs basic, general-purpose internet connectivity tests from the
+# firewall itself. This helps to quickly determine if the firewall has
+# a fundamental issue with reaching the internet.
+#
+# Gathers:
+#   - Ping tests to common public DNS servers (8.8.8.8, 1.1.1.1).
+#   - A traceroute to 8.8.8.8 to check the path to the internet.
+#   - An MTR (My Traceroute) report, which combines ping and traceroute
+#     to diagnose path quality and packet loss.
+#
 perform_connectivity_tests_general() {
     execute_cmd "ping -c 5 8.8.8.8" "Ping 8.8.8.8"; execute_cmd "ping -c 5 1.1.1.1" "Ping 1.1.1.1"
     execute_cmd "traceroute -n -w 1 8.8.8.8" "Traceroute to 8.8.8.8"
@@ -440,6 +635,21 @@ perform_connectivity_tests_general() {
     execute_if_binary_exists "$MTR_CMD" "-n -rwc 5 8.8.8.8" "MTR to 8.8.8.8"
 }
 
+#
+# Captures a small sample of live network traffic. This is an advanced
+# diagnostic step that is useful for debugging complex protocol-level
+# issues.
+#
+# Gathers:
+#   - A capture of 100 packets on the primary WAN interface.
+#   - The capture is configured to be highly verbose (`-vvv -e -X`) and
+#     to exclude common web traffic (ports 80 and 443) to focus on
+#     other potentially problematic traffic.
+#
+# Note:
+#   - This entire section is skipped if the --sanitize flag is used, as
+#     packet captures are very likely to contain sensitive data.
+#
 capture_tcpdump_non_web() {
     if [ "$SANITIZE_MODE" = true ]; then
         STEP_NUM=$((STEP_NUM + 1))
@@ -477,6 +687,17 @@ capture_tcpdump_non_web() {
     echo "$DIVIDER_MAJOR" >> "$OUTPUT_FILE"
 }
 
+#
+# Checks the overall health of the OPNsense system, including firmware
+# status and disk space usage. This is a good starting point for checking
+# the general well-being of the firewall.
+#
+# Gathers:
+#   - OPNsense health and firmware connection/status (`configctl`)
+#   - Filesystem disk usage (`df -h`)
+#   - ZFS pool status, if applicable (`zpool status`)
+#   - Disk partition layout (`gpart show`)
+#
 collect_opnsense_health_disk() {
     execute_if_binary_exists "$CONFIGCTL_CMD" "health fetch" "Fetch Health Data (configctl)"
     execute_if_binary_exists "$CONFIGCTL_CMD" "firmware connection" "Firmware Connection Test (configctl)"
@@ -485,6 +706,17 @@ collect_opnsense_health_disk() {
     execute_cmd "gpart show" "Partition Layout (gpart show)"; execute_cmd "geom disk list" "Disk List (geom disk list)"
 }
 
+#
+# Gathers information about installed software packages and checks their
+# integrity. This is crucial for ensuring that the system's software
+# is in a consistent and healthy state.
+#
+# Gathers:
+#   - A list of all installed packages (`pkg info`)
+#   - A sanity check of package dependencies (`pkg check -saq`)
+#   - An attempt to automatically fix any package issues (`pkg check -Ba`)
+#   - The firmware status as reported by OPNsense (`configctl`)
+#
 collect_pkg_info_integrity() {
     execute_cmd "pkg info | head -n 500" "Package Info (Top 500 lines)"
     execute_cmd "pkg check -saq" "Package Sanity Check (pkg check -saq)"
@@ -494,6 +726,24 @@ collect_pkg_info_integrity() {
     execute_if_binary_exists "$OPNSENSE_UPDATE_CMD" "-s" "OPNsense Update Status (opnsense-update -s)"
 }
 
+#
+# Performs detailed, dynamic connectivity tests for each configured WAN
+# gateway. This is the most important section for diagnosing multi-WAN
+# failover, load balancing, and specific gateway connectivity problems.
+#
+# Logic:
+#   1. It gets a structured JSON list of all gateways from `configctl`.
+#   2. It iterates through each gateway.
+#   3. For each gateway, it intelligently determines the correct source IP
+#      and target IP to use for testing.
+#   4. It executes a ping test and analyzes the output for reachability,
+#      packet loss, and latency, providing suggestions based on the results.
+#
+# Gathers:
+#   - Raw JSON output of gateway status.
+#   - Individual ping tests for each gateway.
+#   - Analysis of packet loss and round-trip time (RTT).
+#
 perform_wan_gateway_tests() {
     local LABEL_GW_TEST_BLOCK start_time_block GATEWAY_DATA_RAW gateway_lines_for_loop IFS_OLD_GW line
     local gw_name iface_from_json gw_ip_from_address_field monitor_val source_ip_from_configctl current_sub_step_label
@@ -637,10 +887,28 @@ perform_wan_gateway_tests() {
     printf "Step %3d: Pausing for %d seconds after Gateway tests...\n" "$STEP_NUM" "$COOLDOWN_SECONDS" > /dev/tty; display_status_banner; sleep "$COOLDOWN_SECONDS"
 }
 
+#
+# Captures a snapshot of the currently running processes on the system.
+# This is useful for identifying processes that are consuming high CPU or
+# memory, or for checking if expected services are running.
+#
+# Gathers:
+#   - A snapshot from the `top` command, sorted by CPU usage.
+#
 collect_processes_snapshot() {
     execute_cmd "top -S -P -d1 -s1 -b -n 20" "Process Snapshot (top)"
 }
 
+#
+# Checks the status of the Network Time Protocol (NTP) service, which is
+# critical for time synchronization. Correct time is essential for logging,
+# authentication (like Kerberos or 2FA), and certificate validation.
+#
+# Gathers:
+#   - The status of the ntpd and chronyd services (`configctl`, `service`)
+#   - A list of NTP peers and their status (`ntpctl` or `ntpq`)
+#   - A list of Chrony time sources (`chronyc`)
+#
 collect_ntp_status() {
     execute_if_binary_exists "$CONFIGCTL_CMD" "service status ntpd" "NTPd Service Status (configctl)"
     execute_if_binary_exists "$CONFIGCTL_CMD" "service status chronyd" "Chronyd Service Status (configctl)"
@@ -656,11 +924,31 @@ collect_ntp_status() {
     display_status_banner
 }
 
+#
+# Gathers the status of all services managed by the OPNsense framework.
+# This provides a high-level overview of which services are enabled and
+# whether they are currently running.
+#
+# Gathers:
+#   - A list of all available services from `configctl`.
+#   - The running status of all services from `configctl`.
+#
 collect_opnsense_services_status() {
     execute_if_binary_exists "$CONFIGCTL_CMD" "service list" "List All Services (configctl)"
     execute_if_binary_exists "$CONFIGCTL_CMD" "service status" "Status All Services (configctl)"
 }
 
+#
+# Dumps the content of several key system configuration files. This is
+# useful for advanced troubleshooting where a manual configuration change
+# or corruption might be suspected.
+#
+# Gathers:
+#   - Core system config (`rc.conf`, `hosts`, `fstab`)
+#   - Syslog configuration (`syslog-ng.conf`, `syslog.conf`)
+#   - NTP/Chrony configuration (`ntp.conf`, `chrony.conf`)
+#   - Cron jobs (`crontab`, `root`)
+#
 collect_key_config_files() {
     cat_if_exists "/etc/rc.conf"; cat_if_exists "/etc/rc.conf.local"; cat_if_exists "/etc/hosts"; cat_if_exists "/etc/fstab"
     cat_if_exists "/usr/local/etc/syslog-ng/syslog-ng.conf"; cat_if_exists "/etc/syslog.conf"; cat_if_exists "/var/etc/ntp.conf"
@@ -668,6 +956,21 @@ collect_key_config_files() {
     cat_if_exists "/var/cron/tabs/root"; cat_if_exists "/etc/newsyslog.conf"; cat_if_exists "/etc/shells"; cat_if_exists "/etc/motd"
 }
 
+#
+# Dumps all kernel state variables (tunables) using `sysctl`.
+# This provides an exhaustive snapshot of the live kernel configuration.
+# It is extremely useful for deep, low-level troubleshooting of performance
+# and stability issues.
+#
+# Gathers:
+#   - The complete output of `sysctl -a`.
+#
+# Note:
+#   - To prevent incorrect FQDN redaction, when in sanitize mode, this
+#     function prepends a unique marker to each line. The `run_sanitization`
+#     function uses this marker to skip FQDN redaction on these lines and
+#     then removes the marker.
+#
 collect_kernel_env() {
     local LABEL_SYSCTL start_time_block end_time_block duration_block
     STEP_NUM=$((STEP_NUM + 1)); LABEL_SYSCTL="Kernel Environment (sysctl -a)"
@@ -688,6 +991,20 @@ collect_kernel_env() {
 declare -a IP_MAP # Associative array to hold IP -> description
 IP_MAP_FILE="" # Temp file to hold the map for sed
 
+#
+# Builds a temporary file containing a mapping of known IP addresses to
+# descriptive labels (e.g., 192.168.1.1 -> [INTERFACE_LAN_IP]).
+# This map is used by the `run_sanitization` function to make the final
+# sanitized output more readable and contextually useful.
+#
+# Logic:
+#   - Gathers IPs from all network interfaces via `ifconfig`.
+#   - Gathers gateway IPs from `configctl`.
+#   - Writes a series of `sed` substitution commands to a temporary file.
+#
+# Note:
+#   - This function only runs when the --sanitize flag is active.
+#
 build_ip_map() {
     if [ "$SANITIZE_MODE" = false ]; then return; fi
     printf "\nBuilding IP address map for sanitization...\n" > /dev/tty
@@ -728,6 +1045,22 @@ build_ip_map() {
     printf "IP map built with %d entries.\n" "$(wc -l < "$IP_MAP_FILE")" > /dev/tty
 }
 
+#
+# Performs the main sanitization process on the final output file.
+# It uses a multi-pass `sed` operation to replace sensitive information
+# with redacted placeholders.
+#
+# Logic:
+#   1. Applies the descriptive IP map created by `build_ip_map`.
+#   2. Applies a series of generic regexes to redact MAC addresses, FQDNs,
+#      any remaining IP addresses, and the hostname.
+#   3. Skips FQDN redaction on lines marked as kernel tunables to prevent
+#      incorrectly redacting them.
+#   4. Removes the kernel tunable markers after other sanitization is complete.
+#
+# Note:
+#   - This function only runs when the --sanitize flag is active.
+#
 run_sanitization() {
     if [ "$SANITIZE_MODE" = true ]; then
         printf "\nSanitizing output file: %s\n" "$OUTPUT_FILE" > /dev/tty
