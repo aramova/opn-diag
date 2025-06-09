@@ -29,8 +29,13 @@
 # - Improved TTY output to be cleaner and more stable (v0.50.14)
 # - Reverted sanitize banner to top right of TTY (v0.50.15)
 # - Improved TTY output by reducing newlines and banner refreshes (v0.50.13)
+# - Fixed unrecognized argument for configctl filter list states (v0.50.17)
+# - Added -n flag to mtr to disable dns resolution for hops (v0.50.18)
+# - Skip tcpdump when in sanitize mode (v0.50.19)
+# - Redact serial numbers from geom disk list in sanitize mode (v0.50.20)
+# - Improved FQDN sanitization (v0.50.21)
 
-SCRIPT_VERSION="v0.50.16"
+SCRIPT_VERSION="v0.50.21"
 OUTPUT_FILE="opnsense_diagnostics_output_$(date +%Y%m%d_%H%M%S).txt"
 DIVIDER_MAJOR="================================================================================"
 DIVIDER_MINOR="--------------------------------------------------------------------------------"
@@ -276,7 +281,11 @@ collect_hardware_diagnostics() {
     fi
     execute_if_binary_exists "$DMIDECODE_CMD" "-q -t system" "DMIdecode System Info (dmidecode -q -t system)"
     execute_if_binary_exists "$DMIDECODE_CMD" "-q -t bios" "DMIdecode BIOS Info (dmidecode -q -t bios)"
-    execute_cmd "geom disk list" "List Disks (geom disk list)"
+    if [ "$SANITIZE_MODE" = true ]; then
+        execute_cmd "geom disk list | sed -E 's/serial: .*/serial: [REDACTED]/g'" "List Disks (geom disk list, sanitized)"
+    else
+        execute_cmd "geom disk list" "List Disks (geom disk list)"
+    fi
     STEP_NUM=$((STEP_NUM + 1)); LABEL_SMART="SMARTCTL Diagnostics for Disks"
     printf "Step %3d: Running: %-50s" "$STEP_NUM" "$LABEL_SMART" > /dev/tty
     start_time_block=$(date +%s)
@@ -383,7 +392,7 @@ collect_firewall_pf_diagnostics() {
     execute_cmd "pfctl -s rules -vv" "PF Rules (pfctl -s rules -vv)"
     execute_cmd "pfctl -s nat -vv" "PF NAT Rules (pfctl -s nat -vv)"
     execute_cmd "echo 'Firewall States (first 500 lines):'; pfctl -s states -vv | head -n 500" "PF States (Top 500)" "cooldown"
-    execute_if_binary_exists "$CONFIGCTL_CMD" "filter list states -n 500" "PF States (configctl, Top 500)"
+    execute_if_binary_exists "$CONFIGCTL_CMD" "filter list states" "PF States (configctl, Top 500)"
     execute_cmd "pfctl -s info -vv" "PF Info (pfctl -s info -vv)"
     execute_if_binary_exists "$CONFIGCTL_CMD" "filter diag info" "PF Info (configctl)"
     execute_cmd "pfctl -s Tables -vv" "PF Tables (pfctl -s Tables -vv)"
@@ -425,10 +434,20 @@ perform_connectivity_tests_general() {
     execute_cmd "ping -c 5 8.8.8.8" "Ping 8.8.8.8"; execute_cmd "ping -c 5 1.1.1.1" "Ping 1.1.1.1"
     execute_cmd "traceroute -n -w 1 8.8.8.8" "Traceroute to 8.8.8.8"
     execute_if_binary_exists "$CONFIGCTL_CMD" "interface traceroute 8.8.8.8" "Traceroute via configctl"
-    execute_if_binary_exists "$MTR_CMD" "-rwc 5 8.8.8.8" "MTR to 8.8.8.8"
+    execute_if_binary_exists "$MTR_CMD" "-n -rwc 5 8.8.8.8" "MTR to 8.8.8.8"
 }
 
 capture_tcpdump_non_web() {
+    if [ "$SANITIZE_MODE" = true ]; then
+        STEP_NUM=$((STEP_NUM + 1))
+        printf "Step %3d: Skipping: TCPDump Non-Web Traffic Capture (Sanitize Mode)\n" "$STEP_NUM" > /dev/tty
+        echo "" >> "$OUTPUT_FILE"; echo "$DIVIDER_MINOR" >> "$OUTPUT_FILE"
+        echo "COMMAND (File Step $STEP_NUM): \"TCPDump Non-Web Traffic Capture\" (SKIPPED due to --sanitize flag)" >> "$OUTPUT_FILE"
+        echo "$DIVIDER_MINOR" >> "$OUTPUT_FILE"
+        echo "$DIVIDER_MAJOR" >> "$OUTPUT_FILE"
+        display_status_banner
+        return
+    fi
     local LABEL_TCPDUMP_BLOCK start_time_block TCPDUMP_IFACE WAN_IFACE_DETAILS
     local DEFAULT_ROUTE_IFACE CMD_STR end_time_block duration_block tcpdump_label
     STEP_NUM=$((STEP_NUM + 1)); LABEL_TCPDUMP_BLOCK="TCPDump Non-Web Traffic Capture Block"
@@ -712,6 +731,7 @@ run_sanitization() {
         # Apply the specific IP map first, then the generic patterns
         sed -E -f "$IP_MAP_FILE" \
             -e 's/[[:<:]]([0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}):[0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}[[:>:]]/\1:[REDACTED_MAC_SUFFIX]/g' \
+            -e 's/[[:<:]][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/[REDACTED_FQDN]/g' \
             -e 's/[[:<:]](25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])[[:>:]]/[REDACTED_IPv4]/g' \
             -e 's/[[:<:]]fd[0-9a-fA-F]{2}:[0-9a-fA-F:]+/[REDACTED_IPv6_ULA]/g' \
             -e 's/[[:<:]]fe80:[0-9a-fA-F:]+/[REDACTED_IPv6_LinkLocal]/g' \
