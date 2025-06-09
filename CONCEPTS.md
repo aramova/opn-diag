@@ -35,9 +35,6 @@ The `opn-diag.sh` script is designed to be a comprehensive, portable, and safe t
     *   **Fallback Mechanisms**: Where possible, the script has fallbacks. For example, if it cannot determine the WAN interface for `tcpdump` from `configctl`, it falls back to parsing the output of `netstat` to find the default route's interface.
 
 ## Diagnostic Sections Breakdown
-
-    *   **Interpretation**: In this sample, the `Current_Pending_Sector` count of 8 indicates there are sectors the drive firmware is unsure about. This is a warning sign that the disk may be developing problems.
-
 ---
 
 ### Section 3: Interface Configuration & Status (`collect_interface_config`)
