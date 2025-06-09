@@ -21,8 +21,16 @@
 # - Fixed ping6 illegal option -X
 # - Fixed WAN Gateway ping by making -S flag conditional
 # - Changed opnsense-log filter to use head for line limiting (v0.50.7)
+# - Changed MAC address sanitization to keep the OUI (v0.50.8)
+# - Added static sanitize status banner to TTY output (v0.50.9)
+# - Fixed sed sanitization for BSD compatibility (v0.50.10)
+# - Moved sanitized status to bottom right of TTY (v0.50.11)
+# - Added descriptive IP sanitization (v0.50.12)
+# - Improved TTY output to be cleaner and more stable (v0.50.14)
+# - Reverted sanitize banner to top right of TTY (v0.50.15)
+# - Improved TTY output by reducing newlines and banner refreshes (v0.50.13)
 
-SCRIPT_VERSION="v0.50.7"
+SCRIPT_VERSION="v0.50.16"
 OUTPUT_FILE="opnsense_diagnostics_output_$(date +%Y%m%d_%H%M%S).txt"
 DIVIDER_MAJOR="================================================================================"
 DIVIDER_MINOR="--------------------------------------------------------------------------------"
@@ -32,6 +40,16 @@ SANITIZE_MODE=false
 if [ "$1" = "--sanitize" ]; then
     SANITIZE_MODE=true
 fi
+
+# TTY Status Banner Colors & Text
+if [ -t 1 ]; then # Ensure we are in an interactive terminal
+    C_GREEN=$(tput setaf 2)
+    C_RED=$(tput setaf 1)
+    C_RESET=$(tput sgr0)
+fi
+MSG_SANITIZED="${C_GREEN}SANITIZED OUTPUT${C_RESET}"
+MSG_UNSANITIZED="${C_RED}UNSANITIZED OUTPUT${C_RESET}"
+
 
 # Define command paths
 OPNSENSE_VERSION_CMD="/usr/local/sbin/opnsense-version"
@@ -68,6 +86,31 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
+display_status_banner() {
+    if [ ! -t 1 ]; then return; fi # Skip if not interactive TTY
+    local message
+    local message_len
+    local term_width
+    local col
+    
+    if [ "$SANITIZE_MODE" = true ]; then
+        message="$MSG_SANITIZED"
+        message_len=18 # Length of "SANITIZED OUTPUT" + color codes
+    else
+        message="$MSG_UNSANITIZED"
+        message_len=20 # Length of "UNSANITIZED OUTPUT" + color codes
+    fi
+
+    term_width=$(tput cols)
+    col=$((term_width - message_len - 2)) # 2 for padding
+
+    tput sc # Save cursor position
+    tput cup 0 "$col" # Move to top right
+    echo -e "$message"
+    tput rc # Restore cursor position
+}
+
+
 # Function to initialize the output file
 initialize_output_file() {
     echo "OPNsense Comprehensive Diagnostics Collection ($SCRIPT_VERSION)" \
@@ -88,6 +131,8 @@ initialize_output_file() {
 
 # Function for initial permission checks (TTY and file)
 perform_initial_checks() {
+    clear # Clear screen for clean banner display
+    display_status_banner
     echo "Starting OPNsense Comprehensive Diagnostics Collection ($SCRIPT_VERSION)."
     echo "Output will be saved to: $OUTPUT_FILE"
     echo "This may take a few minutes..."
@@ -135,7 +180,7 @@ execute_cmd() {
   local CMD_STRING=$1 LABEL=$2 APPLY_COOLDOWN=$3
   local cmd_status start_time end_time duration
   STEP_NUM=$((STEP_NUM + 1))
-  printf "Step %3d: Running: %s ...\n" "$STEP_NUM" "$LABEL" > /dev/tty
+  printf "Step %3d: Running: %-50s" "$STEP_NUM" "$LABEL" > /dev/tty
   start_time=$(date +%s)
   echo "" >> "$OUTPUT_FILE"; echo "$DIVIDER_MINOR" >> "$OUTPUT_FILE"
   # Quote LABEL for file output to preserve spaces
@@ -145,11 +190,12 @@ execute_cmd() {
   eval "$CMD_STRING" >> "$OUTPUT_FILE" 2>&1; cmd_status=$?
   end_time=$(date +%s); duration=$((end_time - start_time))
   echo "Duration: ${duration}s. Exit status: $cmd_status" >> "$OUTPUT_FILE"
-  printf "Step %3d: Finished %s in %ds. Status: %d.\n" "$STEP_NUM" "$LABEL" "$duration" "$cmd_status" > /dev/tty
+  printf "\rStep %3d: Finished: %-50s (%ds, Status: %d)\n" "$STEP_NUM" "$LABEL" "$duration" "$cmd_status" > /dev/tty
   if [ "$APPLY_COOLDOWN" = "cooldown" ]; then
       printf "Step %3d: Pausing for %d seconds after %s...\n" "$STEP_NUM" "$COOLDOWN_SECONDS" "$LABEL" > /dev/tty
       sleep "$COOLDOWN_SECONDS"
   fi
+  display_status_banner
   echo "$DIVIDER_MAJOR" >> "$OUTPUT_FILE"
 }
 
@@ -158,7 +204,7 @@ execute_if_binary_exists() {
   local suggestion cmd_status start_time end_time duration full_command=()
   STEP_NUM=$((STEP_NUM + 1))
   if [ -x "$CMD_PATH" ]; then
-    printf "Step %3d: Running: %s ...\n" "$STEP_NUM" "$LABEL" > /dev/tty
+    printf "Step %3d: Running: %-50s" "$STEP_NUM" "$LABEL" > /dev/tty
     start_time=$(date +%s)
     echo "" >> "$OUTPUT_FILE"; echo "$DIVIDER_MINOR" >> "$OUTPUT_FILE"
     # Quote LABEL for file output
@@ -169,7 +215,7 @@ execute_if_binary_exists() {
     "${full_command[@]}" >> "$OUTPUT_FILE" 2>&1; cmd_status=$?
     end_time=$(date +%s); duration=$((end_time - start_time))
     echo "Duration: ${duration}s. Exit status: $cmd_status" >> "$OUTPUT_FILE"
-    printf "Step %3d: Finished %s in %ds. Status: %d.\n" "$STEP_NUM" "$LABEL" "$duration" "$cmd_status" > /dev/tty
+    printf "\rStep %3d: Finished: %-50s (%ds, Status: %d)\n" "$STEP_NUM" "$LABEL" "$duration" "$cmd_status" > /dev/tty
     if [ "$APPLY_COOLDOWN" = "cooldown" ]; then
         printf "Step %3d: Pausing for %d seconds after %s...\n" "$STEP_NUM" "$COOLDOWN_SECONDS" "$LABEL" > /dev/tty
         sleep "$COOLDOWN_SECONDS"
@@ -182,12 +228,13 @@ execute_if_binary_exists() {
         "$MTR_CMD") suggestion=" (consider 'pkg install mtr-nox11')" ;;
         "$DMIDECODE_CMD") suggestion=" (consider 'pkg install dmidecode')" ;;
     esac
-    printf "Step %3d: Skipping: %s (binary %s not found %s)%s...\n" "$STEP_NUM" "$LABEL" "$CMD_PATH" "or not executable" "$suggestion" > /dev/tty
+    printf "Step %3d: Skipping: %s (binary %s not found %s)%s\n" "$STEP_NUM" "$LABEL" "$CMD_PATH" "or not executable" "$suggestion" > /dev/tty
     echo "" >> "$OUTPUT_FILE"; echo "$DIVIDER_MINOR" >> "$OUTPUT_FILE"
     # Quote LABEL for file output
     echo "COMMAND (File Step $STEP_NUM): \"$LABEL\" (SKIPPED - $CMD_PATH not found or not executable)$suggestion" >> "$OUTPUT_FILE"
     echo "$DIVIDER_MINOR" >> "$OUTPUT_FILE"
   fi
+  display_status_banner
   echo "$DIVIDER_MAJOR" >> "$OUTPUT_FILE"
 }
 
@@ -198,7 +245,7 @@ cat_if_exists() {
         execute_cmd "cat \"$FILE_PATH\"" "$LABEL" 
     else
         STEP_NUM=$((STEP_NUM + 1))
-        printf "Step %3d: Skipping: %s (File not found: %s)...\n" "$STEP_NUM" "$LABEL" "$FILE_PATH" > /dev/tty
+        printf "Step %3d: Skipping: %s (File not found: %s)\n" "$STEP_NUM" "$LABEL" "$FILE_PATH" > /dev/tty
         echo "" >> "$OUTPUT_FILE"; echo "$DIVIDER_MINOR" >> "$OUTPUT_FILE"
         # Use direct string construction for the label in the skipped message
         echo "COMMAND (File Step $STEP_NUM): Content of $FILE_PATH (SKIPPED - File not found or not readable: $FILE_PATH)" >> "$OUTPUT_FILE"
@@ -231,7 +278,7 @@ collect_hardware_diagnostics() {
     execute_if_binary_exists "$DMIDECODE_CMD" "-q -t bios" "DMIdecode BIOS Info (dmidecode -q -t bios)"
     execute_cmd "geom disk list" "List Disks (geom disk list)"
     STEP_NUM=$((STEP_NUM + 1)); LABEL_SMART="SMARTCTL Diagnostics for Disks"
-    printf "Step %3d: Running: %s ...\n" "$STEP_NUM" "$LABEL_SMART" > /dev/tty
+    printf "Step %3d: Running: %-50s" "$STEP_NUM" "$LABEL_SMART" > /dev/tty
     start_time_block=$(date +%s)
     echo "" >> "$OUTPUT_FILE"; echo "$DIVIDER_MINOR" >> "$OUTPUT_FILE"
     echo "COMMAND (File Step $STEP_NUM): \"$LABEL_SMART\" (Block Start)" >> "$OUTPUT_FILE"; echo "$DIVIDER_MINOR" >> "$OUTPUT_FILE"
@@ -239,7 +286,7 @@ collect_hardware_diagnostics() {
         DISKS=$(sysctl -n kern.disks | tr ' ' '\n' | grep -E '^(ada|da|nvme[0-9]+ns[0-9]+|mmcsd[0-9]+|vtbd[0-9]+)')
         if [ -n "$DISKS" ]; then
             for disk in $DISKS; do
-                printf "Step %3d:   Getting SMART info for /dev/%s\n" "$STEP_NUM" "$disk" > /dev/tty
+                printf "\rStep %3d:   Getting SMART info for /dev/%-15s" "$STEP_NUM" "$disk" > /dev/tty
                 echo "$DIVIDER_MINOR" >> "$OUTPUT_FILE"; echo "SMART Information for /dev/$disk:" >> "$OUTPUT_FILE"
                 "$SMARTCTL_CMD" -a "/dev/$disk" >> "$OUTPUT_FILE" 2>&1
                 echo "$DIVIDER_MINOR" >> "$OUTPUT_FILE"; echo "SMART Health Status for /dev/$disk:" >> "$OUTPUT_FILE"
@@ -249,8 +296,9 @@ collect_hardware_diagnostics() {
     else echo "SKIPPED - $SMARTCTL_CMD not found or not exec." >> "$OUTPUT_FILE"; fi
     end_time_block=$(date +%s); duration_block=$((end_time_block - start_time_block))
     echo "Duration for $LABEL_SMART: ${duration_block}s" >> "$OUTPUT_FILE"; echo "$DIVIDER_MAJOR" >> "$OUTPUT_FILE"
-    printf "Step %3d: Finished %s in %ds.\n" "$STEP_NUM" "$LABEL_SMART" "$duration_block" > /dev/tty
+    printf "\rStep %3d: Finished: %-50s (%ds)\n" "$STEP_NUM" "$LABEL_SMART" "$duration_block" > /dev/tty
     printf "Step %3d: Pausing for %d seconds after %s...\n" "$STEP_NUM" "$COOLDOWN_SECONDS" "$LABEL_SMART" > /dev/tty
+    display_status_banner
     sleep "$COOLDOWN_SECONDS"
 }
 
@@ -304,7 +352,7 @@ collect_dns_resolution() {
     execute_if_binary_exists "$DRILL_CMD" "-V 4 $(hostname)" "Drill Local Hostname"
     if [ -x "$CONFIGCTL_CMD" ] && [ -x "$DRILL_CMD" ]; then
         STEP_NUM=$((STEP_NUM + 1)); LABEL_LOCAL_ZONES="Testing Local Unbound Zones with drill"
-        printf "Step %3d: Running: %s ...\n" "$STEP_NUM" "$LABEL_LOCAL_ZONES" > /dev/tty; start_time_block=$(date +%s)
+        printf "Step %3d: Running: %-50s" "$STEP_NUM" "$LABEL_LOCAL_ZONES" > /dev/tty; start_time_block=$(date +%s)
         echo "" >> "$OUTPUT_FILE"; echo "$DIVIDER_MINOR" >> "$OUTPUT_FILE"
         echo "COMMAND (File Step $STEP_NUM): \"$LABEL_LOCAL_ZONES\" (via configctl unbound listlocalzones)" >> "$OUTPUT_FILE"; echo "$DIVIDER_MINOR" >> "$OUTPUT_FILE"
         LOCAL_ZONES_OUTPUT=$($CONFIGCTL_CMD unbound listlocalzones 2>/dev/null)
@@ -314,7 +362,7 @@ collect_dns_resolution() {
             for zone_line in $LOCAL_ZONES_OUTPUT; do
                 zone_to_test=$(echo "$zone_line"|awk '{print $1}'|sed 's/\.$//')
                 if [ -n "$zone_to_test" ]; then
-                    printf "Step %3d:   Drilling local zone: %s\n" "$STEP_NUM" "$zone_to_test" > /dev/tty
+                    printf "\rStep %3d:   Drilling local zone: %-30s" "$STEP_NUM" "$zone_to_test" > /dev/tty
                     echo "Drilling local zone: $zone_to_test" >> "$OUTPUT_FILE"
                     "$DRILL_CMD" -V 4 "$zone_to_test" >> "$OUTPUT_FILE" 2>&1; echo "$DIVIDER_MINOR" >> "$OUTPUT_FILE"
                 fi
@@ -322,12 +370,13 @@ collect_dns_resolution() {
         else echo "No local zones by 'configctl unbound listlocalzones'." >> "$OUTPUT_FILE"; fi
         end_time_block=$(date +%s); duration_block=$((end_time_block - start_time_block))
         echo "Duration for Local Zone Drill block: ${duration_block}s" >> "$OUTPUT_FILE"
-        printf "Step %3d: Finished %s in %ds.\n" "$STEP_NUM" "$LABEL_LOCAL_ZONES" "$duration_block" > /dev/tty
+        printf "\rStep %3d: Finished: %-50s (%ds)\n" "$STEP_NUM" "$LABEL_LOCAL_ZONES" "$duration_block" > /dev/tty
         echo "$DIVIDER_MAJOR" >> "$OUTPUT_FILE"
     else
         STEP_NUM=$((STEP_NUM+1)); printf "Step %3d: Skipping dynamic local zone drill...\n" "$STEP_NUM" > /dev/tty
         echo "$DIVIDER_MINOR\nCOMMAND (File Step $STEP_NUM): \"Dynamic Local Zone Drill\" (SKIPPED)\n$DIVIDER_MINOR\n$DIVIDER_MAJOR" >> "$OUTPUT_FILE"
     fi
+    display_status_banner
 }
 
 collect_firewall_pf_diagnostics() {
@@ -383,7 +432,7 @@ capture_tcpdump_non_web() {
     local LABEL_TCPDUMP_BLOCK start_time_block TCPDUMP_IFACE WAN_IFACE_DETAILS
     local DEFAULT_ROUTE_IFACE CMD_STR end_time_block duration_block tcpdump_label
     STEP_NUM=$((STEP_NUM + 1)); LABEL_TCPDUMP_BLOCK="TCPDump Non-Web Traffic Capture Block"
-    printf "Step %3d: Running: %s ...\n" "$STEP_NUM" "$LABEL_TCPDUMP_BLOCK" > /dev/tty; start_time_block=$(date +%s)
+    printf "Step %3d: Running: %-50s" "$STEP_NUM" "$LABEL_TCPDUMP_BLOCK" > /dev/tty; start_time_block=$(date +%s)
     echo "" >> "$OUTPUT_FILE"; echo "$DIVIDER_MINOR" >> "$OUTPUT_FILE"
     echo "COMMAND (File Step $STEP_NUM): \"$LABEL_TCPDUMP_BLOCK\" (Block Start)" >> "$OUTPUT_FILE"; echo "$DIVIDER_MINOR" >> "$OUTPUT_FILE"
     echo "Determining interface for tcpdump..." >> "$OUTPUT_FILE"; TCPDUMP_IFACE="any"; WAN_IFACE_DETAILS=""
@@ -401,7 +450,8 @@ capture_tcpdump_non_web() {
     tcpdump_label="TCPDump Non-Web Traffic on $TCPDUMP_IFACE"; execute_cmd "$CMD_STR" "$tcpdump_label" "cooldown"
     end_time_block=$(date +%s); duration_block=$((end_time_block - start_time_block))
     echo "Duration for $LABEL_TCPDUMP_BLOCK (incl. capture & cooldown): ${duration_block}s" >> "$OUTPUT_FILE"
-    printf "Step %3d: Finished %s in %ds.\n" "$STEP_NUM" "$LABEL_TCPDUMP_BLOCK" "$duration_block" > /dev/tty
+    printf "\rStep %3d: Finished: %-50s (%ds)\n" "$STEP_NUM" "$LABEL_TCPDUMP_BLOCK" "$duration_block" > /dev/tty
+    display_status_banner
     echo "$DIVIDER_MAJOR" >> "$OUTPUT_FILE"
 }
 
@@ -432,7 +482,7 @@ perform_wan_gateway_tests() {
     local end_time_block duration_block default_route_if
 
     STEP_NUM=$((STEP_NUM + 1)); LABEL_GW_TEST_BLOCK="WAN Gateway Connectivity Tests"
-    printf "Step %3d: Running: %s ...\n" "$STEP_NUM" "$LABEL_GW_TEST_BLOCK" > /dev/tty; start_time_block=$(date +%s)
+    printf "Step %3d: Running: %s ...\n" "$STEP_NUM" "$LABEL_GW_TEST_BLOCK" > /dev/tty; display_status_banner; start_time_block=$(date +%s)
     echo "" >> "$OUTPUT_FILE"; echo "$DIVIDER_MINOR" >> "$OUTPUT_FILE"
     echo "COMMAND (File Step $STEP_NUM): \"$LABEL_GW_TEST_BLOCK\" (Block Start)" >> "$OUTPUT_FILE"
     echo "$DIVIDER_MINOR" >> "$OUTPUT_FILE"
@@ -491,7 +541,7 @@ perform_wan_gateway_tests() {
         fi
 
         current_sub_step_label="Pinging Gateway $gw_name ($ping_target_ip_no_scope) on $iface"
-        printf "Step %3d:   %s ...\n" "$STEP_NUM" "$current_sub_step_label" > /dev/tty; start_time_ping=$(date +%s)
+        printf "\rStep %3d:   %-60s" "$STEP_NUM" "$current_sub_step_label" > /dev/tty; start_time_ping=$(date +%s)
         echo "" >> "$OUTPUT_FILE"; echo "$DIVIDER_MINOR" >> "$OUTPUT_FILE"
         echo "Sub-COMMAND: $current_sub_step_label (Step $STEP_NUM)" >> "$OUTPUT_FILE"
         echo "  Interface: $iface"; echo "  Gateway IP to Ping: $ping_target_ip_no_scope (Original Address: $gw_ip_from_address_field)"; echo "  Source IP (configctl): $source_ip_from_configctl" >> "$OUTPUT_FILE"
@@ -536,7 +586,7 @@ perform_wan_gateway_tests() {
         ping_output=$(eval "$ping_cmd" 2>&1); ping_status=$?
         echo "$ping_output" >> "$OUTPUT_FILE"; end_time_ping=$(date +%s); duration_ping=$((end_time_ping - start_time_ping))
         echo "  Duration for this ping: ${duration_ping}s" >> "$OUTPUT_FILE"
-        printf "Step %3d:     Finished pinging %s in %ds.\n" "$STEP_NUM" "$gw_name" "$duration_ping" > /dev/tty
+        
         if [ $ping_status -eq 0 ]; then
             echo "  Status: Gateway $gw_name ($effective_ping_ip) on $iface is REACHABLE." >> "$OUTPUT_FILE"
             packet_loss=$(echo "$ping_output" | grep "packet loss" | awk '{print $7}' | sed 's/%//')
@@ -561,8 +611,8 @@ perform_wan_gateway_tests() {
     done; IFS="$IFS_OLD_GW"
     end_time_block=$(date +%s); duration_block=$((end_time_block - start_time_block))
     echo "Duration for WAN Gateway block: ${duration_block}s" >> "$OUTPUT_FILE"; echo "$DIVIDER_MAJOR" >> "$OUTPUT_FILE"
-    printf "Step %3d: Finished WAN Gateway block in %ds.\n" "$STEP_NUM" "$duration_block" > /dev/tty
-    printf "Step %3d: Pausing for %d seconds after Gateway tests...\n" "$STEP_NUM" "$COOLDOWN_SECONDS" > /dev/tty; sleep "$COOLDOWN_SECONDS"
+    printf "\rStep %3d: Finished: %-50s (%ds)\n" "$STEP_NUM" "$LABEL_GW_TEST_BLOCK" "$duration_block" > /dev/tty
+    printf "Step %3d: Pausing for %d seconds after Gateway tests...\n" "$STEP_NUM" "$COOLDOWN_SECONDS" > /dev/tty; display_status_banner; sleep "$COOLDOWN_SECONDS"
 }
 
 collect_processes_snapshot() {
@@ -576,11 +626,12 @@ collect_ntp_status() {
     if pgrep -q ntpd; then
         if command -v ntpctl >/dev/null 2>&1; then execute_cmd "ntpctl -s all" "NTP Control (ntpctl)";
         elif command -v ntpq >/dev/null 2>&1; then execute_cmd "ntpq -p" "NTP Peers (ntpq -p)";
-        else STEP_NUM=$((STEP_NUM+1)); printf "Step %3d: Skipping ntpctl/ntpq (tools missing)\n" "$STEP_NUM" >/dev/tty; echo "$DIVIDER_MINOR\nCOMMAND (File Step $STEP_NUM): \"ntpctl/ntpq\" (skipped)\n$DIVIDER_MINOR\n$DIVIDER_MAJOR" >> "$OUTPUT_FILE"; fi
+        else STEP_NUM=$((STEP_NUM+1)); printf "Step %3d: Skipping: ntpctl/ntpq (tools missing)\n" "$STEP_NUM" >/dev/tty; echo "$DIVIDER_MINOR\nCOMMAND (File Step $STEP_NUM): \"ntpctl/ntpq\" (skipped)\n$DIVIDER_MINOR\n$DIVIDER_MAJOR" >> "$OUTPUT_FILE"; fi
     elif pgrep -q chronyd; then
         if command -v chronyc >/dev/null 2>&1; then execute_cmd "chronyc sources" "Chrony Sources (chronyc)";
-        else STEP_NUM=$((STEP_NUM+1)); printf "Step %3d: Skipping chronyc (tool missing)...\n" "$STEP_NUM" >/dev/tty; echo "$DIVIDER_MINOR\nCOMMAND (File Step $STEP_NUM): \"chronyc\" (skipped)\n$DIVIDER_MINOR\n$DIVIDER_MAJOR" >> "$OUTPUT_FILE"; fi
-    else STEP_NUM=$((STEP_NUM+1)); printf "Step %3d: Skipping NTP query (no daemon found)...\n" "$STEP_NUM" >/dev/tty; echo "$DIVIDER_MINOR\nCOMMAND (File Step $STEP_NUM): \"NTP Query\" (skipped)\n$DIVIDER_MINOR\n$DIVIDER_MAJOR" >> "$OUTPUT_FILE"; fi
+        else STEP_NUM=$((STEP_NUM+1)); printf "Step %3d: Skipping: chronyc (tool missing)...\n" "$STEP_NUM" >/dev/tty; echo "$DIVIDER_MINOR\nCOMMAND (File Step $STEP_NUM): \"chronyc\" (skipped)\n$DIVIDER_MINOR\n$DIVIDER_MAJOR" >> "$OUTPUT_FILE"; fi
+    else STEP_NUM=$((STEP_NUM+1)); printf "Step %3d: Skipping: NTP query (no daemon found)...\n" "$STEP_NUM" >/dev/tty; echo "$DIVIDER_MINOR\nCOMMAND (File Step $STEP_NUM): \"NTP Query\" (skipped)\n$DIVIDER_MINOR\n$DIVIDER_MAJOR" >> "$OUTPUT_FILE"; fi
+    display_status_banner
 }
 
 collect_opnsense_services_status() {
@@ -598,13 +649,79 @@ collect_key_config_files() {
 collect_kernel_env() {
     local LABEL_SYSCTL start_time_block end_time_block duration_block
     STEP_NUM=$((STEP_NUM + 1)); LABEL_SYSCTL="Kernel Environment (sysctl -a)"
-    printf "Step %3d: Running: %s ...\n" "$STEP_NUM" "$LABEL_SYSCTL" > /dev/tty; start_time_block=$(date +%s)
+    printf "Step %3d: Running: %-50s" "$STEP_NUM" "$LABEL_SYSCTL" > /dev/tty; start_time_block=$(date +%s)
     echo "" >> "$OUTPUT_FILE"; echo "$DIVIDER_MINOR" >> "$OUTPUT_FILE"
     echo "COMMAND (File Step $STEP_NUM): \"$LABEL_SYSCTL\" (NOTE: This output is very large)" >> "$OUTPUT_FILE"; echo "$DIVIDER_MINOR" >> "$OUTPUT_FILE"
     sysctl -a >> "$OUTPUT_FILE" 2>&1; end_time_block=$(date +%s); duration_block=$((end_time_block - start_time_block))
     echo "Duration for $LABEL_SYSCTL: ${duration_block}s" >> "$OUTPUT_FILE"; echo "$DIVIDER_MAJOR" >> "$OUTPUT_FILE"
-    printf "Step %3d: Finished %s in %ds.\n" "$STEP_NUM" "$LABEL_SYSCTL" "$duration_block" > /dev/tty
-    printf "Step %3d: Pausing for %d seconds after %s...\n" "$STEP_NUM" "$COOLDOWN_SECONDS" "$LABEL_SYSCTL" > /dev/tty; sleep "$COOLDOWN_SECONDS"
+    printf "\rStep %3d: Finished: %-50s (%ds)\n" "$STEP_NUM" "$LABEL_SYSCTL" "$duration_block" > /dev/tty
+    printf "Step %3d: Pausing for %d seconds after %s...\n" "$STEP_NUM" "$COOLDOWN_SECONDS" "$LABEL_SYSCTL" > /dev/tty; display_status_banner; sleep "$COOLDOWN_SECONDS"
+}
+
+declare -a IP_MAP # Associative array to hold IP -> description
+IP_MAP_FILE="" # Temp file to hold the map for sed
+
+build_ip_map() {
+    if [ "$SANITIZE_MODE" = false ]; then return; fi
+    printf "\nBuilding IP address map for sanitization...\n" > /dev/tty
+    
+    IP_MAP_FILE=$(mktemp)
+    # Ensure the temp file is cleaned up on exit
+    trap 'rm -f "$IP_MAP_FILE"' EXIT
+
+    # 1. Gather interface IPs (IPv4 and IPv6)
+    local ifconfig_output
+    ifconfig_output=$(ifconfig -a)
+    
+    echo "$ifconfig_output" | awk '
+        /^[a-zA-Z0-9_]+:/ { iface=$1; sub(/:$/, "", iface) }
+        /inet / { ip=$2; print ip "[INTERFACE_" toupper(iface) "_IP]"; }
+        /inet6 / { ip=$2; sub(/%.*/, "", ip); print ip "[INTERFACE_" toupper(iface) "_IP6]"; }
+    ' | while read -r ip desc; do
+        echo "s/[[:<:]]${ip}[[:>:]]/${desc}/g" >> "$IP_MAP_FILE"
+    done
+
+    # 2. Gather Gateway IPs
+    if [ -x "$CONFIGCTL_CMD" ]; then
+        local gw_json
+        gw_json=$("$CONFIGCTL_CMD" interface gateways status json 2>/dev/null)
+        if [ -n "$gw_json" ] && command -v jq >/dev/null 2>&1; then
+            echo "$gw_json" | jq -r '.[]? | select(.address and .address != "~") | "\(.address) \(.name)"' | while read -r ip name; do
+                safe_name=$(echo "$name" | tr '[:lower:]' '[:upper:]' | sed 's/[^a-zA-Z0-9_]/_/g')
+                desc="[GATEWAY_${safe_name}_IP]"
+                echo "s/[[:<:]]${ip}[[:>:]]/${desc}/g" >> "$IP_MAP_FILE"
+            done
+        fi
+    fi
+
+    # 3. Add localhost
+    echo "s/[[:<:]]127\.0\.0\.1[[:>:]]/[LOCALHOST_IP]/g" >> "$IP_MAP_FILE"
+    echo "s/[[:<:]]::1[[:>:]]/[LOCALHOST_IP6]/g" >> "$IP_MAP_FILE"
+
+    printf "IP map built with %d entries.\n" "$(wc -l < "$IP_MAP_FILE")" > /dev/tty
+}
+
+run_sanitization() {
+    if [ "$SANITIZE_MODE" = true ]; then
+        printf "\nSanitizing output file: %s\n" "$OUTPUT_FILE" > /dev/tty
+        local temp_sanitized_file
+        temp_sanitized_file=$(mktemp)
+        local hostname_val
+        hostname_val=$(hostname)
+
+        # Apply the specific IP map first, then the generic patterns
+        sed -E -f "$IP_MAP_FILE" \
+            -e 's/[[:<:]]([0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}):[0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}[[:>:]]/\1:[REDACTED_MAC_SUFFIX]/g' \
+            -e 's/[[:<:]](25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])[[:>:]]/[REDACTED_IPv4]/g' \
+            -e 's/[[:<:]]fd[0-9a-fA-F]{2}:[0-9a-fA-F:]+/[REDACTED_IPv6_ULA]/g' \
+            -e 's/[[:<:]]fe80:[0-9a-fA-F:]+/[REDACTED_IPv6_LinkLocal]/g' \
+            -e 's/[[:<:]]([23][0-9a-fA-F]{3}:[0-9a-fA-F:]+)[[:>:]]/[REDACTED_IPv6_GUA]/g' \
+            -e "s/[[:<:]]${hostname_val}[[:>:]]/[REDACTED_HOSTNAME]/g" \
+            "$OUTPUT_FILE" > "$temp_sanitized_file"
+
+        mv "$temp_sanitized_file" "$OUTPUT_FILE"
+        printf "Sanitization of %s complete.\n" "$OUTPUT_FILE" > /dev/tty
+    fi
 }
 
 declare -a SECTION_FUNCTIONS SECTION_DESCRIPTIVE_NAMES
@@ -617,7 +734,7 @@ for i in "${!SECTION_FUNCTIONS[@]}"; do current_section_num=$((i + 1)); echo "Se
 echo "$DIVIDER_MAJOR" >> "$OUTPUT_FILE"
 for i in "${!SECTION_FUNCTIONS[@]}"; do
     SECTION_NUM=$((i + 1)); section_func_name="${SECTION_FUNCTIONS[i]}"; section_desc_name="${SECTION_DESCRIPTIVE_NAMES[i]}"
-    section_start_time=$(date +%s); echo "" > /dev/tty 
+    section_start_time=$(date +%s) 
     printf "Starting Section %d: %s\n" "$SECTION_NUM" "$section_desc_name" > /dev/tty
     echo "" >> "$OUTPUT_FILE"; echo "$DIVIDER_MAJOR" >> "$OUTPUT_FILE"; printf "SECTION %d: %s\n" "$SECTION_NUM" "$section_desc_name" >> "$OUTPUT_FILE"; echo "$DIVIDER_MINOR" >> "$OUTPUT_FILE"
     "$section_func_name" # Call the actual collection function
@@ -626,6 +743,10 @@ for i in "${!SECTION_FUNCTIONS[@]}"; do
     echo "" >> "$OUTPUT_FILE"; echo "$DIVIDER_MINOR" >> "$OUTPUT_FILE"
     echo "Section $SECTION_NUM '$section_desc_name' completed in ${section_duration}s." >> "$OUTPUT_FILE"
 done
+
+build_ip_map
+run_sanitization
+
 echo "" >> "$OUTPUT_FILE"; echo "$DIVIDER_MAJOR" >> "$OUTPUT_FILE"; echo "Diagnostics collection finished." >> "$OUTPUT_FILE"; echo "Output file: $OUTPUT_FILE" >> "$OUTPUT_FILE"; echo "$DIVIDER_MAJOR" >> "$OUTPUT_FILE"
 MD5_FILE="${OUTPUT_FILE}.md5"; SHA256_FILE="${OUTPUT_FILE}.sha256"
 MD5_HASH=$( (md5 -q "$OUTPUT_FILE" 2>/dev/null || md5sum "$OUTPUT_FILE" 2>/dev/null | awk '{print $1}') || echo "md5_tool_not_found_or_failed")
